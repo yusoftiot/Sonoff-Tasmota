@@ -1,7 +1,7 @@
 /*
   xdrv_30_exs_dimmer.ino - ex-store dimmer support for Tasmota
 
-  Copyright (C) 2019  Andreas Schultz
+  Copyright (C) 2020  Andreas Schultz
 
   This program is free software: you can redistribute it and/or modify
   it under the terms of the GNU General Public License as published by
@@ -508,10 +508,10 @@ const char kExsCommands[] PROGMEM = D_PRFX_EXS "|"
   D_CMND_EXS_DIMMS "|" D_CMND_EXS_CH_LOCK "|"
   D_CMND_EXS_STATE;
 
-void (* const ExsCommand[])(void) PROGMEM =
-  { &CmndExsDimm,  &CmndExsDimmTbl,  &CmndExsDimmVal,
-    &CmndExsDimms,  &CmndExsChLock,
-    &CmndExsState };
+void (* const ExsCommand[])(void) PROGMEM = {
+  &CmndExsDimm,  &CmndExsDimmTbl,  &CmndExsDimmVal,
+  &CmndExsDimms,  &CmndExsChLock,
+  &CmndExsState };
 
 void CmndExsDimm(void)
 {

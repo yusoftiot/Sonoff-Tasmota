@@ -1,7 +1,7 @@
 /*
   xdrv_08_serial_bridge.ino - serial bridge support for Tasmota
 
-  Copyright (C) 2019  Theo Arends and Dániel Zoltán Tolnai
+  Copyright (C) 2020  Theo Arends and Dániel Zoltán Tolnai
 
   This program is free software: you can redistribute it and/or modify
   it under the terms of the GNU General Public License as published by
@@ -29,8 +29,8 @@ const uint8_t SERIAL_BRIDGE_BUFFER_SIZE = 130;
 const char kSerialBridgeCommands[] PROGMEM = "|"  // No prefix
   D_CMND_SSERIALSEND "|" D_CMND_SBAUDRATE;
 
-void (* const SerialBridgeCommand[])(void) PROGMEM =
-  { &CmndSSerialSend, &CmndSBaudrate };
+void (* const SerialBridgeCommand[])(void) PROGMEM = {
+  &CmndSSerialSend, &CmndSBaudrate };
 
 #include <TasmotaSerial.h>
 

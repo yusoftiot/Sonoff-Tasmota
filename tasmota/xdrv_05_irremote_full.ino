@@ -1,7 +1,7 @@
 /*
   xdrv_05_irremote_full.ino - complete integration of IRremoteESP8266 for Tasmota
 
-  Copyright (C) 2019  Heiko Krupp, Lazar Obradovic, Theo Arends, Stephan Hadinger
+  Copyright (C) 2020  Heiko Krupp, Lazar Obradovic, Theo Arends, Stephan Hadinger
 
   This program is free software: you can redistribute it and/or modify
   it under the terms of the GNU General Public License as published by
@@ -33,9 +33,11 @@
 enum IrErrors { IE_RESPONSE_PROVIDED, IE_NO_ERROR, IE_INVALID_RAWDATA, IE_INVALID_JSON, IE_SYNTAX_IRSEND, IE_SYNTAX_IRHVAC,
                 IE_UNSUPPORTED_HVAC, IE_UNSUPPORTED_PROTOCOL };
 
-const char kIrRemoteCommands[] PROGMEM = "|" D_CMND_IRHVAC "|" D_CMND_IRSEND ; // No prefix
+const char kIrRemoteCommands[] PROGMEM = "|"
+  D_CMND_IRHVAC "|" D_CMND_IRSEND ; // No prefix
 
-void (* const IrRemoteCommand[])(void) PROGMEM = { &CmndIrHvac, &CmndIrSend };
+void (* const IrRemoteCommand[])(void) PROGMEM = {
+  &CmndIrHvac, &CmndIrSend };
 
 /*********************************************************************************************\
  * IR Send

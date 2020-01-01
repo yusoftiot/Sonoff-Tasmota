@@ -1,7 +1,7 @@
 /*
   xdrv_17_rcswitch.ino - RF transceiver using RcSwitch library for Tasmota
 
-  Copyright (C) 2019  Theo Arends
+  Copyright (C) 2020  Theo Arends
 
   This program is free software: you can redistribute it and/or modify
   it under the terms of the GNU General Public License as published by
@@ -35,8 +35,8 @@
 const char kRfSendCommands[] PROGMEM = "|"  // No prefix
   D_CMND_RFSEND;
 
-void (* const RfSendCommand[])(void) PROGMEM =
-  { &CmndRfSend };
+void (* const RfSendCommand[])(void) PROGMEM = {
+  &CmndRfSend };
 
 #include <RCSwitch.h>
 
@@ -85,6 +85,7 @@ void RfInit(void)
     mySwitch.enableTransmit(pin[GPIO_RFSEND]);
   }
   if (pin[GPIO_RFRECV] < 99) {
+    pinMode( pin[GPIO_RFRECV], INPUT);
     mySwitch.enableReceive(pin[GPIO_RFRECV]);
   }
 }
