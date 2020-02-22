@@ -50,6 +50,7 @@ struct WIFI {
   uint8_t mdns_begun = 0;                  // mDNS active
   uint8_t scan_state;
   uint8_t bssid[6];
+  int8_t best_network_db;
 } Wifi;
 
 int WifiGetRssiAsQuality(int rssi)
@@ -198,13 +199,18 @@ void WifiBegin(uint8_t flag, uint8_t channel)
     WiFi.config(Settings.ip_address[0], Settings.ip_address[1], Settings.ip_address[2], Settings.ip_address[3]);  // Set static IP
   }
   WiFi.hostname(my_hostname);
+
+  char stemp[40] = { 0 };
   if (channel) {
     WiFi.begin(SettingsText(SET_STASSID1 + Settings.sta_active), SettingsText(SET_STAPWD1 + Settings.sta_active), channel, Wifi.bssid);
+    // Add connected BSSID and channel for multi-AP installations
+    char hex_char[18];
+    snprintf_P(stemp, sizeof(stemp), PSTR(" Channel %d BSSId %s"), channel, ToHex_P((unsigned char*)Wifi.bssid, 6, hex_char, sizeof(hex_char), ':'));
   } else {
     WiFi.begin(SettingsText(SET_STASSID1 + Settings.sta_active), SettingsText(SET_STAPWD1 + Settings.sta_active));
   }
-  AddLog_P2(LOG_LEVEL_INFO, PSTR(D_LOG_WIFI D_CONNECTING_TO_AP "%d %s " D_IN_MODE " 11%c " D_AS " %s..."),
-    Settings.sta_active +1, SettingsText(SET_STASSID1 + Settings.sta_active), kWifiPhyMode[WiFi.getPhyMode() & 0x3], my_hostname);
+  AddLog_P2(LOG_LEVEL_INFO, PSTR(D_LOG_WIFI D_CONNECTING_TO_AP "%d %s%s " D_IN_MODE " 11%c " D_AS " %s..."),
+    Settings.sta_active +1, SettingsText(SET_STASSID1 + Settings.sta_active), stemp, kWifiPhyMode[WiFi.getPhyMode() & 0x3], my_hostname);
 
 #if LWIP_IPV6
   for (bool configured = false; !configured;) {
@@ -223,22 +229,22 @@ void WifiBegin(uint8_t flag, uint8_t channel)
 
 void WifiBeginAfterScan(void)
 {
-  static int8_t best_network_db;
-
   // Not active
   if (0 == Wifi.scan_state) { return; }
   // Init scan when not connected
   if (1 == Wifi.scan_state) {
     memset((void*) &Wifi.bssid, 0, sizeof(Wifi.bssid));
-    best_network_db = -127;
+    Wifi.best_network_db = -127;
     Wifi.scan_state = 3;
   }
   // Init scan when connected
   if (2 == Wifi.scan_state) {
     uint8_t* bssid = WiFi.BSSID();                  // Get current bssid
     memcpy((void*) &Wifi.bssid, (void*) bssid, sizeof(Wifi.bssid));
-    best_network_db = WiFi.RSSI();                  // Get current rssi and add threshold
-    if (best_network_db < -WIFI_RSSI_THRESHOLD) { best_network_db += WIFI_RSSI_THRESHOLD; }
+    Wifi.best_network_db = WiFi.RSSI();             // Get current rssi and add threshold
+    if (Wifi.best_network_db < -WIFI_RSSI_THRESHOLD) {
+      Wifi.best_network_db += WIFI_RSSI_THRESHOLD;
+    }
     Wifi.scan_state = 3;
   }
   // Init scan
@@ -279,12 +285,12 @@ void WifiBeginAfterScan(void)
 
         bool known = false;
         uint32_t j;
-        for (j = 0; j < 2; j++) {
+        for (j = 0; j < MAX_SSIDS; j++) {
           if (ssid_scan == SettingsText(SET_STASSID1 + j)) {  // SSID match
             known = true;
-            if (rssi_scan > best_network_db) {      // Best network
+            if (rssi_scan > Wifi.best_network_db) {      // Best network
               if (sec_scan == ENC_TYPE_NONE || SettingsText(SET_STAPWD1 + j)) {  // Check for passphrase if not open wlan
-                best_network_db = (int8_t)rssi_scan;
+                Wifi.best_network_db = (int8_t)rssi_scan;
                 channel = chan_scan;
                 ap = j;                             // AP1 or AP2
                 memcpy((void*) &Wifi.bssid, (void*) bssid_scan, sizeof(Wifi.bssid));
@@ -384,8 +390,8 @@ void WifiCheckIp(void)
     WifiSetState(1);
     Wifi.counter = WIFI_CHECK_SEC;
     Wifi.retry = Wifi.retry_init;
-    AddLog_P((Wifi.status != WL_CONNECTED) ? LOG_LEVEL_INFO : LOG_LEVEL_DEBUG_MORE, S_LOG_WIFI, PSTR(D_CONNECTED));
     if (Wifi.status != WL_CONNECTED) {
+      AddLog_P(LOG_LEVEL_INFO, S_LOG_WIFI, PSTR(D_CONNECTED));
 //      AddLog_P(LOG_LEVEL_INFO, PSTR("Wifi: Set IP addresses"));
       Settings.ip_address[1] = (uint32_t)WiFi.gatewayIP();
       Settings.ip_address[2] = (uint32_t)WiFi.subnetMask();

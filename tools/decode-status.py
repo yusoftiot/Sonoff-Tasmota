@@ -3,7 +3,7 @@
 """
   decode-status.py - decode status for Tasmota
 
-  Copyright (C) 2019 Theo Arends
+  Copyright (C) 2020  Theo Arends
 
   This program is free software: you can redistribute it and/or modify
   it under the terms of the GNU General Public License as published by
@@ -136,7 +136,10 @@ a_setoption = [[
     "Enable shutter support",
     "Invert PCF8574 ports"
     ],[
-    "","","","",
+    "Reduced CT range for Alexa",
+    "Use FriendlyNames instead of ShortAddresses when possible",
+    "(AWS IoT) publish MQTT state to a device shadow",
+    "",
     "","","","",
     "","","","",
     "","","","",
@@ -189,6 +192,15 @@ a_features = [[
     "USE_SONOFF_SC","USE_SONOFF_RF","USE_SONOFF_L1","USE_EXS_DIMMER",
     "USE_ARDUINO_SLAVE","USE_HIH6","USE_HPMA","USE_TSL2591",
     "USE_DHT12","USE_DS1624","USE_GPS","USE_HOTPLUG",
+    "USE_NRF24","USE_MIBLE","USE_HM10","USE_LE01MR",
+    "USE_AHT1x","USE_WEMOS_MOTOR_V1","",""
+    ],[
+    "","","","",
+    "","","","",
+    "","","","",
+    "","","","",
+    "","","","",
+    "","","","",
     "","","","",
     "","","",""
     ]]
@@ -224,7 +236,7 @@ else:
         obj = json.load(fp)
 
 def StartDecode():
-    print ("\n*** decode-status.py v20190819 by Theo Arends and Jacek Ziolkowski ***")
+    print ("\n*** decode-status.py v20200222 by Theo Arends and Jacek Ziolkowski ***")
 
 #    print("Decoding\n{}".format(obj))
 
