@@ -17,6 +17,7 @@
   along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
+
 #ifdef USE_SCRIPT
 #ifndef USE_RULES
 /*********************************************************************************************\
@@ -60,6 +61,40 @@ keywords if then else endif, or, and are better readable for beginners (others m
 #define SCRIPT_MAXPERM (PMEM_SIZE)-4/sizeof(float)
 #define MAX_SCRIPT_SIZE MAX_RULE_SIZE*MAX_RULE_SETS
 
+
+
+uint32_t EncodeLightId(uint8_t relay_id);
+uint32_t DecodeLightId(uint32_t hue_id);
+
+#if defined(ESP32) && defined(ESP32_SCRIPT_SIZE) && !defined(USE_24C256) && !defined(USE_SCRIPT_FATFS)
+
+#include "FS.h"
+#include "SPIFFS.h"
+void SaveFile(const char *name,const uint8_t *buf,uint32_t len) {
+  File file = SPIFFS.open(name, FILE_WRITE);
+  if (!file) return;
+  file.write(buf, len);
+  file.close();
+}
+
+#define FORMAT_SPIFFS_IF_FAILED true
+uint8_t spiffs_mounted=0;
+
+void LoadFile(const char *name,uint8_t *buf,uint32_t len) {
+  if (!spiffs_mounted) {
+    if(!SPIFFS.begin(FORMAT_SPIFFS_IF_FAILED)){
+          //Serial.println("SPIFFS Mount Failed");
+      return;
+    }
+    spiffs_mounted=1;
+  }
+  File file = SPIFFS.open(name);
+  if (!file) return;
+  file.read(buf, len);
+  file.close();
+}
+#endif
+
 // offsets epoch readings by 1.1.2019 00:00:00 to fit into float with second resolution
 #define EPOCH_OFFSET 1546300800
 
@@ -68,14 +103,36 @@ enum {SCRIPT_LOGLEVEL=1,SCRIPT_TELEPERIOD};
 
 #ifdef USE_SCRIPT_FATFS
 #include <SPI.h>
+
+//#define USE_MMC
+
+#ifdef USE_MMC
+#include <SD_MMC.h>
+#undef FS_USED
+#define FS_USED SD_MMC
+#else
 #include <SD.h>
+#undef FS_USED
+#define FS_USED SD
+#endif
+
+#ifndef ESP32
+#undef FILE_WRITE
+#define FILE_WRITE (sdfat::O_READ | sdfat::O_WRITE | sdfat::O_CREAT)
+#define FILE_APPEND (sdfat::O_READ | sdfat::O_WRITE | sdfat::O_CREAT | sdfat::O_APPEND)
+#endif
+
 #ifndef FAT_SCRIPT_SIZE
 #define FAT_SCRIPT_SIZE 4096
 #endif
+#ifdef ESP32
+#undef FAT_SCRIPT_NAME
+#define FAT_SCRIPT_NAME "/script.txt"
+#else
+#undef FAT_SCRIPT_NAME
 #define FAT_SCRIPT_NAME "script.txt"
-#if USE_LONG_FILE_NAMES==1
-#warning ("FATFS long filenames not supported");
 #endif
+
 #if USE_STANDARD_SPI_LIBRARY==0
 #warning ("FATFS standard spi should be used");
 #endif
@@ -231,7 +288,6 @@ void RulesTeleperiod(void) {
 #ifndef EEP_SCRIPT_SIZE
 #define EEP_SCRIPT_SIZE 4095
 #endif
-
 
 static Eeprom24C128_256 eeprom(EEPROM_ADDRESS);
 // eeprom.writeBytes(address, length, buffer);
@@ -554,7 +610,11 @@ char *script;
 
 #ifdef USE_SCRIPT_FATFS
     if (!glob_script_mem.script_sd_found) {
-      if (SD.begin(USE_SCRIPT_FATFS)) {
+#ifdef USE_MMC
+      if (FS_USED.begin()) {
+#else
+      if (FS_USED.begin(USE_SCRIPT_FATFS)) {
+#endif
         glob_script_mem.script_sd_found=1;
       } else {
         glob_script_mem.script_sd_found=0;
@@ -1132,20 +1192,36 @@ chknext:
           goto exit;
         }
         break;
-#ifdef USE_SCRIPT_FATFS
       case 'f':
+#ifdef USE_SCRIPT_FATFS
         if (!strncmp(vname,"fo(",3)) {
           lp+=3;
           char str[SCRIPT_MAXSSIZE];
           lp=GetStringResult(lp,OPER_EQU,str,0);
           while (*lp==' ') lp++;
-          lp=GetNumericResult(lp,OPER_EQU,&fvar,0);
-          uint8_t mode=fvar;
+          uint8_t mode=0;
+          if ((*lp=='r') || (*lp=='w') || (*lp=='a')) {
+            switch (*lp) {
+              case 'r':
+                mode=0;
+                break;
+              case 'w':
+                mode=1;
+                break;
+              case 'a':
+                mode=2;
+                break;
+            }
+            lp++;
+          } else {
+            lp=GetNumericResult(lp,OPER_EQU,&fvar,0);
+            mode=fvar;
+          }
           fvar=-1;
           for (uint8_t cnt=0;cnt<SFS_MAX;cnt++) {
             if (!glob_script_mem.file_flags[cnt].is_open) {
               if (mode==0) {
-                glob_script_mem.files[cnt]=SD.open(str,FILE_READ);
+                glob_script_mem.files[cnt]=FS_USED.open(str,FILE_READ);
                 if (glob_script_mem.files[cnt].isDirectory()) {
                   glob_script_mem.files[cnt].rewindDirectory();
                   glob_script_mem.file_flags[cnt].is_dir=1;
@@ -1153,7 +1229,13 @@ chknext:
                   glob_script_mem.file_flags[cnt].is_dir=0;
                 }
               }
-              else glob_script_mem.files[cnt]=SD.open(str,FILE_WRITE);
+              else {
+                if (mode==1) {
+                  glob_script_mem.files[cnt]=FS_USED.open(str,FILE_WRITE);
+                } else {
+                  glob_script_mem.files[cnt]=FS_USED.open(str,FILE_APPEND);
+                }
+              }
               if (glob_script_mem.files[cnt]) {
                 fvar=cnt;
                 glob_script_mem.file_flags[cnt].is_open=1;
@@ -1241,7 +1323,13 @@ chknext:
                 File entry=glob_script_mem.files[find].openNextFile();
                 if (entry) {
                   if (!reject((char*)entry.name())) {
-                    strcpy(str,entry.name());
+                    char *ep=(char*)entry.name();
+                    if (*ep=='/') ep++;
+                    char *lcp = strrchr(ep,'/');
+                    if (lcp) {
+                      ep=lcp+1;
+                    }
+                    strcpy(str,ep);
                     entry.close();
                     break;
                   }
@@ -1279,18 +1367,47 @@ chknext:
           lp+=3;
           char str[glob_script_mem.max_ssize+1];
           lp=GetStringResult(lp,OPER_EQU,str,0);
-          SD.remove(str);
+          FS_USED.remove(str);
           lp++;
           len=0;
           goto exit;
         }
+#if defined(ESP32) && defined(USE_WEBCAM)
+        if (!strncmp(vname,"fwp(",4)) {
+          lp+=4;
+          lp=GetNumericResult(lp,OPER_EQU,&fvar,0);
+          while (*lp==' ') lp++;
+          float fvar1;
+          lp=GetNumericResult(lp,OPER_EQU,&fvar1,0);
+          uint8_t ind=fvar1;
+          if (ind>=SFS_MAX) ind=SFS_MAX-1;
+          if (glob_script_mem.file_flags[ind].is_open) {
+            uint8_t *buff;
+            float maxps=get_picstore(-1,0);
+            if (fvar<1 || fvar>maxps) fvar=1;
+            uint32_t len=get_picstore(fvar-1, &buff);
+            if (len) {
+              //glob_script_mem.files[ind].seek(0,SeekEnd);
+              fvar=glob_script_mem.files[ind].write(buff,len);
+            } else {
+              fvar=0;
+            }
+            //AddLog_P2(LOG_LEVEL_INFO, PSTR("picture save: %d"), len);
+          } else {
+            fvar=0;
+          }
+          lp++;
+          len=0;
+          goto exit;
+        }
+#endif
 #ifdef USE_SCRIPT_FATFS_EXT
         if (!strncmp(vname,"fe(",3)) {
           lp+=3;
           char str[glob_script_mem.max_ssize+1];
           lp=GetStringResult(lp,OPER_EQU,str,0);
           // execute script
-          File ef=SD.open(str);
+          File ef=FS_USED.open(str);
           if (ef) {
             uint16_t fsiz=ef.size();
             if (fsiz<2048) {
@@ -1312,7 +1429,7 @@ chknext:
           lp+=4;
           char str[glob_script_mem.max_ssize+1];
           lp=GetStringResult(lp,OPER_EQU,str,0);
-          fvar=SD.mkdir(str);
+          fvar=FS_USED.mkdir(str);
           lp++;
           len=0;
           goto exit;
@@ -1321,7 +1438,7 @@ chknext:
           lp+=4;
           char str[glob_script_mem.max_ssize+1];
           lp=GetStringResult(lp,OPER_EQU,str,0);
-          fvar=SD.rmdir(str);
+          fvar=FS_USED.rmdir(str);
           lp++;
           len=0;
           goto exit;
@@ -1330,13 +1447,13 @@ chknext:
           lp+=3;
           char str[glob_script_mem.max_ssize+1];
           lp=GetStringResult(lp,OPER_EQU,str,0);
-          if (SD.exists(str)) fvar=1;
+          if (FS_USED.exists(str)) fvar=1;
           else fvar=0;
           lp++;
           len=0;
           goto exit;
         }
-#endif
+#endif // USE_SCRIPT_FATFS_EXT
         if (!strncmp(vname,"fl1(",4) || !strncmp(vname,"fl2(",4) )  {
           uint8_t lknum=*(lp+2)&3;
           lp+=4;
@@ -1354,9 +1471,16 @@ chknext:
           //card_init();
           goto exit;
         }
-        break;
-
 #endif //USE_SCRIPT_FATFS
+        if (!strncmp(vname,"freq",4)) {
+#ifdef ESP32
+          fvar=getCpuFrequencyMhz();
+#else
+          fvar=ESP.getCpuFreqMHz();
+#endif
+          goto exit;
+        }
+        break;
       case 'g':
         if (!strncmp(vname,"gtmp",4)) {
           fvar=global_temperature;
@@ -1381,7 +1505,7 @@ chknext:
           goto exit;
         }
         if (!strncmp(vname,"heap",4)) {
-          fvar=ESP.getFreeHeap();
+          fvar=ESP_getFreeHeap();
           goto exit;
         }
         if (!strncmp(vname,"hn(",3)) {
@@ -1438,6 +1562,10 @@ chknext:
         }
         break;
       case 'l':
+        if (!strncmp(vname,"lip",3)) {
+          if (sp) strlcpy(sp,(const char*)WiFi.localIP().toString().c_str(),glob_script_mem.max_ssize);
+          goto strexit;
+        }
         if (!strncmp(vname,"loglvl",6)) {
           fvar=glob_script_mem.script_loglevel;
           tind->index=SCRIPT_LOGLEVEL;
@@ -1496,6 +1624,37 @@ chknext:
           fvar=!global_state.mqtt_down;
           goto exit;
         }
+        if (!strncmp(vname,"mp(",3)) {
+          lp+=3;
+          float fvar1;
+          lp=GetNumericResult(lp,OPER_EQU,&fvar1,0);
+          SCRIPT_SKIP_SPACES
+          while (*lp!=')') {
+            char *opp=lp;
+            lp++;
+            float fvar2;
+            lp=GetNumericResult(lp,OPER_EQU,&fvar2,0);
+            SCRIPT_SKIP_SPACES
+            fvar=fvar1;
+            if ((*opp=='<' && fvar1<fvar2) ||
+                (*opp=='>' && fvar1>fvar2) ||
+                (*opp=='=' && fvar1==fvar2))
+            {
+              if (*lp!='<' && *lp!='>' && *lp!='=' && *lp!=')' && *lp!=SCRIPT_EOL) {
+                float fvar3;
+                lp=GetNumericResult(lp,OPER_EQU,&fvar3,0);
+                SCRIPT_SKIP_SPACES
+                fvar=fvar3;
+              } else {
+                fvar=fvar2;
+              }
+              break;
+            }
+            while (*lp!='<' && *lp!='>' && *lp!='=' && *lp!=')' && *lp!=SCRIPT_EOL) lp++;
+          }
+          len=0;
+          goto exit;
+        }
         break;
       case 'p':
         if (!strncmp(vname,"pin[",4)) {
@@ -1508,7 +1667,15 @@ chknext:
         }
         if (!strncmp(vname,"pn[",3)) {
           GetNumericResult(vname+3,OPER_EQU,&fvar,0);
-          fvar=pin[(uint8_t)fvar];
+          fvar=Pin(fvar);
+          // skip ] bracket
+          len++;
+          goto exit;
+        }
+        if (!strncmp(vname,"pn[",3)) {
+          GetNumericResult(vname+3,OPER_EQU,&fvar,0);
+//          fvar=pin_gpio[(uint8_t)fvar];
+          fvar=Pin(fvar);
           // skip ] bracket
           len++;
           goto exit;
@@ -1516,13 +1683,22 @@ chknext:
         if (!strncmp(vname,"pd[",3)) {
           GetNumericResult(vname+3,OPER_EQU,&fvar,0);
           uint8_t gpiopin=fvar;
+/*
           for (uint8_t i=0;i<GPIO_SENSOR_END;i++) {
-            if (pin[i]==gpiopin) {
+//            if (pin_gpio[i]==gpiopin) {
+            if (Pin(i)==gpiopin) {
               fvar=i;
               // skip ] bracket
               len++;
               goto exit;
             }
+          }
+*/
+          if ((gpiopin < ARRAY_SIZE(gpio_pin)) && (gpio_pin[gpiopin] > 0)) {
+            fvar = gpio_pin[gpiopin];
+            // skip ] bracket
+            len++;
+            goto exit;
           }
           fvar=999;
           goto exit;
@@ -1715,7 +1891,7 @@ chknext:
           goto exit;
         }
 #endif
-#ifdef USE_SML_SCRIPT_CMD
+#if defined(USE_SML_M) && defined (USE_SML_SCRIPT_CMD)
         if (!strncmp(vname,"sml(",4)) {
           lp+=4;
           float fvar1;
@@ -1728,13 +1904,18 @@ chknext:
             float fvar3;
             lp=GetNumericResult(lp,OPER_EQU,&fvar3,0);
             fvar=SML_SetBaud(fvar1,fvar3);
-          } else {
+          } else if (fvar2==1) {
             char str[SCRIPT_MAXSSIZE];
             lp=GetStringResult(lp,OPER_EQU,str,0);
             fvar=SML_Write(fvar1,str);
+          } else {
+#ifdef ED300L
+            fvar=SML_Status(fvar1);
+#else
+            fvar=0;
+#endif
           }
           lp++;
-          fvar=0;
           len=0;
           goto exit;
         }
@@ -1822,6 +2003,60 @@ chknext:
         break;
 
       case 'w':
+#if defined(ESP32) && defined(USE_WEBCAM)
+        if (!strncmp(vname,"wc(",3)) {
+          lp+=3;
+          float fvar1;
+          lp=GetNumericResult(lp,OPER_EQU,&fvar1,0);
+          SCRIPT_SKIP_SPACES
+          switch ((uint32)fvar1) {
+            case 0:
+              { float fvar2;
+                lp=GetNumericResult(lp,OPER_EQU,&fvar2,0);
+                fvar=wc_setup(fvar2);
+              }
+              break;
+            case 1:
+              { float fvar2;
+                lp=GetNumericResult(lp,OPER_EQU,&fvar2,0);
+                fvar=wc_get_frame(fvar2);
+              }
+              break;
+            case 2:
+              { float fvar2,fvar3;
+                lp=GetNumericResult(lp,OPER_EQU,&fvar2,0);
+                SCRIPT_SKIP_SPACES
+                lp=GetNumericResult(lp,OPER_EQU,&fvar3,0);
+                fvar=wc_set_options(fvar2,fvar3);
+              }
+              break;
+            case 3:
+              fvar=wc_get_width();
+              break;
+            case 4:
+              fvar=wc_get_height();
+              break;
+            case 5:
+              { float fvar2;
+                lp=GetNumericResult(lp,OPER_EQU,&fvar2,0);
+                fvar=wc_set_streamserver(fvar2);
+              }
+              break;
+            case 6:
+              { float fvar2;
+                lp=GetNumericResult(lp,OPER_EQU,&fvar2,0);
+                fvar=wc_set_motion_detect(fvar2);
+              }
+              break;
+
+            default:
+              fvar=0;
+          }
+          lp++;
+          len=0;
+          goto exit;
+        }
+#endif
         if (!strncmp(vname,"wday",4)) {
           fvar=RtcTime.day_of_week;
           goto exit;
@@ -1992,6 +2227,7 @@ char *getop(char *lp, uint8_t *operand) {
 }
 
 
+#ifdef ESP8266
 #if defined(ARDUINO_ESP8266_RELEASE_2_3_0) || defined(ARDUINO_ESP8266_RELEASE_2_4_0) || defined(ARDUINO_ESP8266_RELEASE_2_4_1)
 // All version before core 2.4.2
 // https://github.com/esp8266/Arduino/issues/2557
@@ -2012,6 +2248,12 @@ extern "C" {
 uint16_t GetStack(void) {
   register uint32_t *sp asm("a1");
   return (4 * (sp - g_pcont->stack));
+}
+#endif
+#else
+uint16_t GetStack(void) {
+  register uint8_t *sp asm("a1");
+  return (sp - pxTaskGetStackStart(NULL));
 }
 #endif
 
@@ -2635,9 +2877,29 @@ int16_t Run_Scripter(const char *type, int8_t tlen, char *js) {
               lp=GetNumericResult(lp,OPER_EQU,&fvar,0);
               int8_t pinnr=fvar;
               SCRIPT_SKIP_SPACES
-              lp=GetNumericResult(lp,OPER_EQU,&fvar,0);
-              int8_t mode=fvar;
-              pinMode(pinnr,mode&3);
+              uint8_t mode=0;
+              if ((*lp=='I') || (*lp=='O') || (*lp=='P')) {
+                switch (*lp) {
+                  case 'I':
+                    mode=0;
+                    break;
+                  case 'O':
+                    mode=1;
+                    break;
+                  case 'P':
+                    mode=2;
+                    break;
+                }
+                lp++;
+              } else {
+                lp=GetNumericResult(lp,OPER_EQU,&fvar,0);
+                mode=fvar;
+              }
+              uint8_t pm=0;
+              if (mode==0) pm=INPUT;
+              if (mode==1) pm=OUTPUT;
+              if (mode==2) pm=INPUT_PULLUP;
+              pinMode(pinnr,pm);
               goto next_line;
             } else if (!strncmp(lp,"spin(",5)) {
               lp+=5;
@@ -2676,6 +2938,21 @@ int16_t Run_Scripter(const char *type, int8_t tlen, char *js) {
               goto next_line;
             }
 #endif
+#endif
+#ifdef ESP32
+            else if (!strncmp(lp,"beep(",5)) {
+              lp+=5;
+              lp=GetNumericResult(lp,OPER_EQU,&fvar,0);
+              if (fvar<0) {
+                ledcSetup(7,500,10);
+                ledcAttachPin(-fvar,7);
+                ledcWriteTone(7,0);
+              } else {
+                ledcWriteTone(7,fvar);
+              }
+              lp++;
+              goto next_line;
+            }
 #endif
 
             else if (!strncmp(lp,"=>",2) || !strncmp(lp,"->",2) || !strncmp(lp,"+>",2) || !strncmp(lp,"print",5)) {
@@ -3070,7 +3347,7 @@ const char HTTP_FORM_SCRIPT[] PROGMEM =
 
 const char HTTP_FORM_SCRIPT1[] PROGMEM =
     "<div style='text-align:right' id='charNum'> </div>"
-    "<input style='width:3%%;' id='c%d' name='c%d' type='checkbox'%s><b>" D_SCRIPT_ENABLE "</b><br/>"
+    "<label><input style='width:3%%;' id='c%d' name='c%d' type='checkbox'%s><b>" D_SCRIPT_ENABLE "</b></label><br/>"
     "<br><textarea  id='t1' name='t1' rows='8' cols='80' maxlength='%d' style='font-size: 12pt' >";
 
 const char HTTP_FORM_SCRIPT1b[] PROGMEM =
@@ -3187,7 +3464,7 @@ const char HTTP_FORM_FILE_UPGb[] PROGMEM =
 const char HTTP_FORM_SDC_DIRa[] PROGMEM =
 "<div style='text-align:left'>";
 const char HTTP_FORM_SDC_DIRb[] PROGMEM =
- "<pre><a href='%s' file='%s'>%s</a>    %d</pre>";
+ "<pre><a href='%s' file='%s'>%s</a>     %s : %8d</pre>";
 const char HTTP_FORM_SDC_DIRd[] PROGMEM =
 "<pre><a href='%s' file='%s'>%s</a></pre>";
 const char HTTP_FORM_SDC_DIRc[] PROGMEM =
@@ -3210,6 +3487,7 @@ const char HTTP_FORM_SDC_HREF[] PROGMEM =
 
 uint8_t reject(char *name) {
 
+  while (*name=='/') name++;
   if (*name=='_') return 1;
   if (*name=='.') return 1;
 
@@ -3224,6 +3502,8 @@ uint8_t reject(char *name) {
   if (!strcasecmp(name,"FSEVEN~1")) return 1;
   if (!strcasecmp(name,"SYSTEM~1")) return 1;
 #endif
+
+  if (!strncasecmp(name,"System Volume",13)) return 1;
   return 0;
 }
 
@@ -3233,7 +3513,7 @@ void ListDir(char *path, uint8_t depth) {
   char format[12];
   sprintf(format,"%%-%ds",24-depth);
 
-  File dir=SD.open(path);
+  File dir=FS_USED.open(path);
   if (dir) {
     dir.rewindDirectory();
     if (strlen(path)>1) {
@@ -3247,35 +3527,48 @@ void ListDir(char *path, uint8_t depth) {
       }
       WSContentSend_P(HTTP_FORM_SDC_DIRd,npath,path,"..");
     }
+    char *ep;
     while (true) {
       File entry=dir.openNextFile();
       if (!entry) {
         break;
       }
+      // esp32 returns path here, shorten to filename
+      ep=(char*)entry.name();
+      if (*ep=='/') ep++;
+      char *lcp = strrchr(ep,'/');
+      if (lcp) {
+        ep=lcp+1;
+      }
+      //AddLog_P2(LOG_LEVEL_INFO, PSTR("entry: %s"),ep);
+      time_t tm=entry.getLastWrite();
+      char tstr[24];
+      strftime(tstr, 22, "%d-%m-%Y - %H:%M:%S ", localtime(&tm));
+
       char *pp=path;
       if (!*(pp+1)) pp++;
       char *cp=name;
       // osx formatted disks contain a lot of stuff we dont want
-      if (reject((char*)entry.name())) goto fclose;
+      if (reject((char*)ep)) goto fclose;
 
       for (uint8_t cnt=0;cnt<depth;cnt++) {
         *cp++='-';
       }
-      // unfortunately no time date info in class File
-      sprintf(cp,format,entry.name());
+
+      sprintf(cp,format,ep);
       if (entry.isDirectory()) {
-        snprintf_P(npath,sizeof(npath),HTTP_FORM_SDC_HREF,WiFi.localIP().toString().c_str(),pp,entry.name());
-        WSContentSend_P(HTTP_FORM_SDC_DIRd,npath,entry.name(),name);
+        snprintf_P(npath,sizeof(npath),HTTP_FORM_SDC_HREF,WiFi.localIP().toString().c_str(),pp,ep);
+        WSContentSend_P(HTTP_FORM_SDC_DIRd,npath,ep,name);
         uint8_t plen=strlen(path);
         if (plen>1) {
           strcat(path,"/");
         }
-        strcat(path,entry.name());
+        strcat(path,ep);
         ListDir(path,depth+4);
         path[plen]=0;
       } else {
-          snprintf_P(npath,sizeof(npath),HTTP_FORM_SDC_HREF,WiFi.localIP().toString().c_str(),pp,entry.name());
-          WSContentSend_P(HTTP_FORM_SDC_DIRb,npath,entry.name(),name,entry.size());
+          snprintf_P(npath,sizeof(npath),HTTP_FORM_SDC_HREF,WiFi.localIP().toString().c_str(),pp,ep);
+          WSContentSend_P(HTTP_FORM_SDC_DIRb,npath,ep,name,tstr,entry.size());
       }
       fclose:
       entry.close();
@@ -3293,8 +3586,8 @@ void Script_FileUploadConfiguration(void)
 
   if (!HttpCheckPriviledgedAccess()) { return; }
 
-  if (WebServer->hasArg("download")) {
-    String stmp = WebServer->arg("download");
+  if (Webserver->hasArg("download")) {
+    String stmp = Webserver->arg("download");
     char *cp=(char*)stmp.c_str();
     if (DownloadFile(cp)) {
       // is directory
@@ -3338,12 +3631,12 @@ void script_upload(void) {
 
   //AddLog_P(LOG_LEVEL_INFO, PSTR("HTP: file upload"));
 
-  HTTPUpload& upload = WebServer->upload();
+  HTTPUpload& upload = Webserver->upload();
   if (upload.status == UPLOAD_FILE_START) {
     char npath[48];
     sprintf(npath,"%s/%s",path,upload.filename.c_str());
-    SD.remove(npath);
-    upload_file=SD.open(npath,FILE_WRITE);
+    FS_USED.remove(npath);
+    upload_file=FS_USED.open(npath,FILE_WRITE);
     if (!upload_file) Web.upload_error=1;
   } else if(upload.status == UPLOAD_FILE_WRITE) {
     if (upload_file) upload_file.write(upload.buf,upload.currentSize);
@@ -3354,7 +3647,7 @@ void script_upload(void) {
     }
   } else {
     Web.upload_error=1;
-    WebServer->send(500, "text/plain", "500: couldn't create file");
+    Webserver->send(500, "text/plain", "500: couldn't create file");
   }
 }
 
@@ -3362,12 +3655,12 @@ uint8_t DownloadFile(char *file) {
   File download_file;
   WiFiClient download_Client;
 
-    if (!SD.exists(file)) {
+    if (!FS_USED.exists(file)) {
       AddLog_P(LOG_LEVEL_INFO,PSTR("file not found"));
       return 0;
     }
 
-    download_file=SD.open(file,FILE_READ);
+    download_file=FS_USED.open(file,FILE_READ);
     if (!download_file) {
       AddLog_P(LOG_LEVEL_INFO,PSTR("could not open file"));
       return 0;
@@ -3380,8 +3673,8 @@ uint8_t DownloadFile(char *file) {
 
     uint32_t flen=download_file.size();
 
-    download_Client = WebServer->client();
-    WebServer->setContentLength(flen);
+    download_Client = Webserver->client();
+    Webserver->setContentLength(flen);
 
     char attachment[100];
     char *cp;
@@ -3392,7 +3685,7 @@ uint8_t DownloadFile(char *file) {
       }
     }
     snprintf_P(attachment, sizeof(attachment), PSTR("attachment; filename=%s"),cp);
-    WebServer->sendHeader(F("Content-Disposition"), attachment);
+    Webserver->sendHeader(F("Content-Disposition"), attachment);
     WSSend(200, CT_STREAM, "");
 
     uint8_t buff[512];
@@ -3424,12 +3717,13 @@ uint8_t DownloadFile(char *file) {
 void HandleScriptTextareaConfiguration(void) {
   if (!HttpCheckPriviledgedAccess()) { return; }
 
-  if (WebServer->hasArg("save")) {
+  if (Webserver->hasArg("save")) {
     ScriptSaveSettings();
     HandleConfiguration();
     return;
   }
 }
+
 
 void HandleScriptConfiguration(void) {
 
@@ -3438,13 +3732,13 @@ void HandleScriptConfiguration(void) {
     AddLog_P(LOG_LEVEL_DEBUG, S_LOG_HTTP, S_CONFIGURE_SCRIPT);
 
 #ifdef USE_SCRIPT_FATFS
-    if (WebServer->hasArg("d1")) {
+    if (Webserver->hasArg("d1")) {
       DownloadFile(glob_script_mem.flink[0]);
     }
-    if (WebServer->hasArg("d2")) {
+    if (Webserver->hasArg("d2")) {
       DownloadFile(glob_script_mem.flink[1]);
     }
-    if (WebServer->hasArg("upl")) {
+    if (Webserver->hasArg("upl")) {
       Script_FileUploadConfiguration();
     }
 #endif
@@ -3484,14 +3778,14 @@ void HandleScriptConfiguration(void) {
 
 void ScriptSaveSettings(void) {
 
-  if (WebServer->hasArg("c1")) {
+  if (Webserver->hasArg("c1")) {
     bitWrite(Settings.rule_enabled,0,1);
   } else {
     bitWrite(Settings.rule_enabled,0,0);
   }
 
 
-  String str = WebServer->arg("t1");
+  String str = Webserver->arg("t1");
 
   if (*str.c_str()) {
 
@@ -3532,23 +3826,26 @@ void ScriptSaveSettings(void) {
 
     strlcpy(glob_script_mem.script_ram,str.c_str(), glob_script_mem.script_size);
 
-#ifdef USE_24C256
-#ifndef USE_SCRIPT_FATFS
+#if defined(USE_24C256) && !defined(USE_SCRIPT_FATFS)
     if (glob_script_mem.flags&1) {
       EEP_WRITE(0,EEP_SCRIPT_SIZE,glob_script_mem.script_ram);
     }
 #endif
-#endif
 
-#ifdef USE_SCRIPT_FATFS
+#if !defined(USE_24C256) && defined(USE_SCRIPT_FATFS)
     if (glob_script_mem.flags&1) {
-      SD.remove(FAT_SCRIPT_NAME);
-      File file=SD.open(FAT_SCRIPT_NAME,FILE_WRITE);
-      file.write(glob_script_mem.script_ram,FAT_SCRIPT_SIZE);
+      FS_USED.remove(FAT_SCRIPT_NAME);
+      File file=FS_USED.open(FAT_SCRIPT_NAME,FILE_WRITE);
+      file.write((const uint8_t*)glob_script_mem.script_ram,FAT_SCRIPT_SIZE);
       file.close();
     }
 #endif
 
+#if defined(ESP32) && defined(ESP32_SCRIPT_SIZE) && !defined(USE_24C256) && !defined(USE_SCRIPT_FATFS)
+    if (glob_script_mem.flags&1) {
+      SaveFile("/script.txt",(uint8_t*)glob_script_mem.script_ram,ESP32_SCRIPT_SIZE);
+    }
+#endif
   }
 
   if (glob_script_mem.script_mem) {
@@ -3942,11 +4239,11 @@ void Script_Handle_Hue(String *path) {
   uint8_t device = DecodeLightId(atoi(path->c_str()));
   uint8_t index = device-devices_present-1;
 
-  if (WebServer->args()) {
+  if (Webserver->args()) {
     response = "[";
 
     StaticJsonBuffer<400> jsonBuffer;
-    JsonObject &hue_json = jsonBuffer.parseObject(WebServer->arg((WebServer->args())-1));
+    JsonObject &hue_json = jsonBuffer.parseObject(Webserver->arg((Webserver->args())-1));
     if (hue_json.containsKey("on")) {
 
       response += FPSTR(sHUE_LIGHT_RESPONSE_JSON);
@@ -4186,6 +4483,14 @@ void dateTime(uint16_t* date, uint16_t* time) {
 
 
 #ifdef SUPPORT_MQTT_EVENT
+
+#ifndef MQTT_EVENT_MSIZE
+#define MQTT_EVENT_MSIZE 256
+#endif
+#ifndef MQTT_EVENT_JSIZE
+#define MQTT_EVENT_JSIZE 400
+#endif
+
 /********************************************************************************************/
 /*
  * Script: Process received MQTT message.
@@ -4200,8 +4505,8 @@ bool ScriptMqttData(void)
 {
   bool serviced = false;
   //toLog(">>> 1");
-  toLog(XdrvMailbox.data);
-  if (XdrvMailbox.data_len < 1 || XdrvMailbox.data_len > 256) {
+  //toLog(XdrvMailbox.data);
+  if (XdrvMailbox.data_len < 1 || XdrvMailbox.data_len > MQTT_EVENT_MSIZE) {
     return false;
   }
   String sTopic = XdrvMailbox.topic;
@@ -4221,7 +4526,7 @@ bool ScriptMqttData(void)
       if (event_item.Key.length() == 0) {   //If did not specify Key
         value = sData;
       } else {      //If specified Key, need to parse Key/Value from JSON data
-        StaticJsonBuffer<400> jsonBuf;
+        StaticJsonBuffer<MQTT_EVENT_JSIZE> jsonBuf;
         JsonObject& jsonData = jsonBuf.parseObject(sData);
         String key1 = event_item.Key;
         String key2;
@@ -4388,8 +4693,8 @@ void Script_Check_HTML_Setvars(void) {
 
   if (!HttpCheckPriviledgedAccess()) { return; }
 
-  if (WebServer->hasArg("sv")) {
-    String stmp = WebServer->arg("sv");
+  if (Webserver->hasArg("sv")) {
+    String stmp = Webserver->arg("sv");
     char cmdbuf[64];
     memset(cmdbuf,0,sizeof(cmdbuf));
     char *cp=cmdbuf;
@@ -4465,7 +4770,7 @@ uint32_t cnt;
   nbuf[cnt]=0;
 }
 
-void ScriptWebShow(void) {
+void ScriptWebShow(char mc) {
   uint8_t web_script=Run_Scripter(">W",-2,0);
   if (web_script==99) {
     char line[128];
@@ -4492,12 +4797,16 @@ void ScriptWebShow(void) {
           cp++;
         }
         char *lin=line;
+        if (!mc && (*lin!='&')) {
+
         if (*lin=='@') {
           lin++;
           optflg=1;
         } else {
           optflg=0;
         }
+
+
         // check for input elements
         if (!strncmp(lin,"sl(",3)) {
           // insert slider sl(min max var left mid right)
@@ -4657,6 +4966,12 @@ void ScriptWebShow(void) {
             WSContentSend_PD(PSTR("{s}%s{e}"),tmp);
           }
         }
+        } else {
+          if (*lin==mc) {
+            Replace_Cmd_Vars(lin+1,tmp,sizeof(tmp));
+            WSContentSend_PD(PSTR("%s"),tmp);
+          }
+        }
       }
       if (*lp==SCRIPT_EOL) {
         lp++;
@@ -4672,7 +4987,8 @@ void ScriptWebShow(void) {
 
 
 #ifdef USE_SENDMAIL
-void script_send_email_body(BearSSL::WiFiClientSecure_light *client) {
+
+void script_send_email_body(void(*func)(char *)) {
 uint8_t msect=Run_Scripter(">m",-2,0);
   if (msect==99) {
     char line[128];
@@ -4698,7 +5014,8 @@ uint8_t msect=Run_Scripter(">m",-2,0);
           cp++;
         }
         Replace_Cmd_Vars(line,tmp,sizeof(tmp));
-        client->println(tmp);
+        //client->println(tmp);
+        func(tmp);
       }
       if (*lp==SCRIPT_EOL) {
         lp++;
@@ -4709,7 +5026,8 @@ uint8_t msect=Run_Scripter(">m",-2,0);
       }
     }
   } else {
-    client->println("*");
+    //client->println("*");
+    func((char*)"*");
   }
 }
 #endif
@@ -4756,6 +5074,10 @@ void ScriptJsonAppend(void) {
 #endif //USE_SCRIPT_JSON_EXPORT
 
 
+bool RulesProcessEvent(char *json_event) {
+  if (bitRead(Settings.rule_enabled, 0)) Run_Scripter(">E",2,json_event);
+}
+
 /*********************************************************************************************\
  * Interface
 \*********************************************************************************************/
@@ -4767,6 +5089,7 @@ bool Xdrv10(uint8_t function)
   switch (function) {
     case FUNC_PRE_INIT:
       // set defaults to rules memory
+      //bitWrite(Settings.rule_enabled,0,0);
       glob_script_mem.script_ram=Settings.rules[0];
       glob_script_mem.script_size=MAX_SCRIPT_SIZE;
       glob_script_mem.flags=0;
@@ -4806,15 +5129,29 @@ bool Xdrv10(uint8_t function)
 #endif
 
 #ifdef USE_SCRIPT_FATFS
-      if (SD.begin(USE_SCRIPT_FATFS)) {
+
+#ifdef USE_MMC
+      if (FS_USED.begin()) {
+#else
+
+#ifdef ESP32
+      if (PinUsed(GPIO_SPI_MOSI) && PinUsed(GPIO_SPI_MISO) && PinUsed(GPIO_SPI_CLK)) {
+        SPI.begin(Pin(GPIO_SPI_CLK),Pin(GPIO_SPI_MISO),Pin(GPIO_SPI_MOSI), -1);
+      }
+#endif
+      if (FS_USED.begin(USE_SCRIPT_FATFS)) {
+#endif
+
+        //FS_USED.dateTimeCallback(dateTime);
+
         glob_script_mem.script_sd_found=1;
         char *script;
         script=(char*)calloc(FAT_SCRIPT_SIZE+4,1);
         if (!script) break;
         glob_script_mem.script_ram=script;
         glob_script_mem.script_size=FAT_SCRIPT_SIZE;
-        if (SD.exists(FAT_SCRIPT_NAME)) {
-          File file=SD.open(FAT_SCRIPT_NAME,FILE_READ);
+        if (FS_USED.exists(FAT_SCRIPT_NAME)) {
+          File file=FS_USED.open(FAT_SCRIPT_NAME,FILE_READ);
           file.read((uint8_t*)script,FAT_SCRIPT_SIZE);
           file.close();
         }
@@ -4825,14 +5162,24 @@ bool Xdrv10(uint8_t function)
 
         glob_script_mem.flags=1;
 
-#if defined(ARDUINO_ESP8266_RELEASE_2_3_0) || defined(ARDUINO_ESP8266_RELEASE_2_4_2)
-        // for unkonwn reasons is not defined in 2.52
-        SdFile::dateTimeCallback(dateTime);
-#endif
-
       } else {
         glob_script_mem.script_sd_found=0;
       }
+#endif
+
+
+#if defined(ESP32) && defined(ESP32_SCRIPT_SIZE) && !defined(USE_24C256) && !defined(USE_SCRIPT_FATFS)
+    char *script;
+    script=(char*)calloc(ESP32_SCRIPT_SIZE+4,1);
+    if (!script) break;
+    LoadFile("/script.txt",(uint8_t*)script,ESP32_SCRIPT_SIZE);
+    glob_script_mem.script_ram=script;
+    glob_script_mem.script_size=ESP32_SCRIPT_SIZE;
+    script[ESP32_SCRIPT_SIZE-1]=0;
+    // use rules storage for permanent vars
+    glob_script_mem.script_pram=(uint8_t*)Settings.rules[0];
+    glob_script_mem.script_pram_size=MAX_SCRIPT_SIZE;
+    glob_script_mem.flags=1;
 #endif
 
       // assure permanent memory is 4 byte aligned
@@ -4877,14 +5224,18 @@ bool Xdrv10(uint8_t function)
     case FUNC_WEB_ADD_BUTTON:
       WSContentSend_P(HTTP_BTN_MENU_RULES);
       break;
+    case FUNC_WEB_ADD_MAIN_BUTTON:
+      ScriptWebShow('&');
+      break;
+
     case FUNC_WEB_ADD_HANDLER:
-      WebServer->on("/" WEB_HANDLE_SCRIPT, HandleScriptConfiguration);
-      WebServer->on("/ta",HTTP_POST, HandleScriptTextareaConfiguration);
+      Webserver->on("/" WEB_HANDLE_SCRIPT, HandleScriptConfiguration);
+      Webserver->on("/ta",HTTP_POST, HandleScriptTextareaConfiguration);
 
 #ifdef USE_SCRIPT_FATFS
-      WebServer->on("/u3", HTTP_POST,[]() { WebServer->sendHeader("Location","/u3");WebServer->send(303);},script_upload);
-      WebServer->on("/u3", HTTP_GET,ScriptFileUploadSuccess);
-      WebServer->on("/upl", HTTP_GET,Script_FileUploadConfiguration);
+      Webserver->on("/u3", HTTP_POST,[]() { Webserver->sendHeader("Location","/u3");Webserver->send(303);},script_upload);
+      Webserver->on("/u3", HTTP_GET,ScriptFileUploadSuccess);
+      Webserver->on("/upl", HTTP_GET,Script_FileUploadConfiguration);
 #endif
       break;
 #endif // USE_WEBSERVER
@@ -4904,7 +5255,7 @@ bool Xdrv10(uint8_t function)
 #ifdef USE_SCRIPT_WEB_DISPLAY
     case FUNC_WEB_SENSOR:
       if (bitRead(Settings.rule_enabled, 0)) {
-        ScriptWebShow();
+        ScriptWebShow(0);
       }
       break;
 #endif //USE_SCRIPT_WEB_DISPLAY
